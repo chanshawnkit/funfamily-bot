@@ -1,6 +1,6 @@
 import logging
 import os
-from datetime import date
+from datetime import date, datetime
 from dotenv import load_dotenv
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
 from telegram.ext import (
@@ -22,7 +22,8 @@ DEPOSIT_SHEET = "Deposit Sheet"
 
 HEADER_ROW = 2  # Excel row containing column headers for Stock Sheet
 
-SELECT_MEMBER, ENTER_TICKER, ENTER_DATE, ENTER_AMOUNT_ANY, SELECT_CURRENCY, ENTER_AMOUNT_SGD, SELECT_PLATFORM = range(7)
+SELECT_MEMBER, ENTER_TICKER, ENTER_DATE, ENTER_AMOUNT_ANY, ENTER_PRICE, SELECT_CURRENCY, ENTER_AMOUNT_SGD, SELECT_PLATFORM = range(8)
+REM_SELECT_MEMBER, REM_SELECT_TICKER, REM_ENTER_DATE, REM_CONFIRM = range(8, 12)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -46,6 +47,7 @@ def append_stock_position(
     amount_sgd: float,
     platform: str,
     ticker: str,
+    original_price_any: float | None = None,
     product: str | None = None,
     reference: str | None = None,
 ) -> None:
@@ -113,11 +115,18 @@ def append_stock_position(
     set_by_header("Ticker", ticker)
     set_by_header("Reference", reference or "")
 
-    # Leave price/valuation columns blank initially; price updater will fill them.
-    set_by_header("Original Purchase Price (Any $)", None)
-    set_by_header("Holding Price (Any $)", None)
-    set_by_header("Gross Holding Value (S$)", None)
-    set_by_header("Net Earning/Loss (S$)", None)
+    # Seed price/valuation columns so units and P&L are well-defined.
+    if original_price_any is not None:
+        set_by_header("Original Purchase Price (Any $)", float(original_price_any))
+        # At purchase time, holding price equals purchase price, value is invested amount, P&L is zero.
+        set_by_header("Holding Price (Any $)", float(original_price_any))
+        set_by_header("Gross Holding Value (S$)", float(amount_sgd))
+        set_by_header("Net Earning/Loss (S$)", 0.0)
+    else:
+        set_by_header("Original Purchase Price (Any $)", None)
+        set_by_header("Holding Price (Any $)", None)
+        set_by_header("Gross Holding Value (S$)", None)
+        set_by_header("Net Earning/Loss (S$)", None)
 
     wb.save(EXCEL_PATH)
 
@@ -353,6 +362,26 @@ async def addstock_amount_any(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     context.user_data.setdefault("addstock", {})["amount_any"] = amount_any
 
+    await update.message.reply_text(
+        "Please enter the purchase price per unit (Any $), e.g. 25.50:"
+    )
+    return ENTER_PRICE
+
+
+async def addstock_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").replace(",", "").strip()
+    try:
+        price_any = float(text)
+        if price_any <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "Price must be a positive number, e.g. 25.50. Please try again:"
+        )
+        return ENTER_PRICE
+
+    context.user_data.setdefault("addstock", {})["price_any"] = price_any
+
     keyboard = [["SGD", "USD"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     await update.message.reply_text(
@@ -428,6 +457,7 @@ async def addstock_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
             amount_sgd=data["amount_sgd"],
             platform=data["platform"],
             ticker=data["ticker"],
+            original_price_any=data.get("price_any"),
         )
     except Exception as e:
         logger.exception("Failed to append stock position")
@@ -457,6 +487,203 @@ async def addstock_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def removestock_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    df = load_stock()
+    members = sorted(df["Purchaser"].dropna().unique().tolist())
+    if not members:
+        await update.message.reply_text(
+            "No existing members found in the stock sheet. Please add at least one row in Excel first."
+        )
+        return ConversationHandler.END
+
+    keyboard = [[m] for m in members]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+
+    context.user_data["removestock"] = {}
+    await update.message.reply_text(
+        "Please select the member whose stock you want to remove:",
+        reply_markup=reply_markup,
+    )
+    return REM_SELECT_MEMBER
+
+
+async def removestock_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    member = (update.message.text or "").strip()
+    if not member:
+        await update.message.reply_text("Please choose a member from the list.")
+        return REM_SELECT_MEMBER
+
+    df = load_stock()
+    rows = df[df["Purchaser"].str.strip().str.lower() == member.lower()]
+    if rows.empty:
+        await update.message.reply_text(
+            f"No holdings found for {member}. Nothing to remove."
+        )
+        return ConversationHandler.END
+
+    tickers = sorted(rows["Ticker"].dropna().unique().tolist())
+    if not tickers:
+        await update.message.reply_text(
+            f"No tickers found for {member}. Nothing to remove."
+        )
+        return ConversationHandler.END
+
+    keyboard = [[t] for t in tickers]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+
+    data = context.user_data.setdefault("removestock", {})
+    data["member"] = member
+
+    await update.message.reply_text(
+        "Please select the ticker to remove:",
+        reply_markup=reply_markup,
+    )
+    return REM_SELECT_TICKER
+
+
+async def removestock_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ticker = (update.message.text or "").strip()
+    if not ticker:
+        await update.message.reply_text("Please choose a ticker from the list.")
+        return REM_SELECT_TICKER
+
+    data = context.user_data.setdefault("removestock", {})
+    data["ticker"] = ticker
+
+    await update.message.reply_text(
+        "Please enter the purchase date in YYYY-MM-DD format for the row you want to delete:",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return REM_ENTER_DATE
+
+
+async def removestock_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    date_text = (update.message.text or "").strip()
+    try:
+        target_date = date.fromisoformat(date_text)
+    except ValueError:
+        await update.message.reply_text(
+            "Date must be in YYYY-MM-DD format, e.g. 2026-03-15. Please try again:"
+        )
+        return REM_ENTER_DATE
+
+    data = context.user_data.setdefault("removestock", {})
+    data["date"] = target_date
+
+    await update.message.reply_text(
+        (
+            f"You are about to remove all rows for {data['member']}, "
+            f"ticker {data['ticker']}, date {target_date.isoformat()}.\n"
+            "Reply YES to confirm, or NO to cancel."
+        )
+    )
+    return REM_CONFIRM
+
+
+async def removestock_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    answer = (update.message.text or "").strip().lower()
+    if answer not in {"yes", "y", "no", "n"}:
+        await update.message.reply_text(
+            "Please reply YES to confirm, or NO to cancel."
+        )
+        return REM_CONFIRM
+
+    if answer in {"no", "n"}:
+        context.user_data.pop("removestock", None)
+        await update.message.reply_text("Remove stock operation cancelled.")
+        return ConversationHandler.END
+
+    data = context.user_data.get("removestock") or {}
+    member = data.get("member")
+    ticker = data.get("ticker")
+    target_date = data.get("date")
+    if not (member and ticker and target_date):
+        await update.message.reply_text(
+            "Missing information to remove stock. Please try /removestock again."
+        )
+        context.user_data.pop("removestock", None)
+        return ConversationHandler.END
+
+    try:
+        wb = openpyxl_load(EXCEL_PATH)
+        if STOCK_SHEET not in wb.sheetnames:
+            raise RuntimeError(f"Sheet '{STOCK_SHEET}' not found in workbook")
+
+        ws = wb[STOCK_SHEET]
+
+        # Build header map for key columns
+        header_map: dict[str, int] = {}
+        for col in range(1, ws.max_column + 1):
+            val = ws.cell(row=HEADER_ROW, column=col).value
+            if val is None:
+                continue
+            name = str(val).strip()
+            if name:
+                header_map[name] = col
+
+        col_purchaser = header_map.get("Purchaser")
+        col_ticker = header_map.get("Ticker")
+        col_date = header_map.get("Date of Purchase")
+        if not (col_purchaser and col_ticker and col_date):
+            raise RuntimeError("Required columns (Purchaser, Ticker, Date of Purchase) not found in sheet.")
+
+        rows_to_delete: list[int] = []
+        for row in range(HEADER_ROW + 1, ws.max_row + 1):
+            cell_purch = ws.cell(row=row, column=col_purchaser).value
+            cell_tic = ws.cell(row=row, column=col_ticker).value
+            cell_date = ws.cell(row=row, column=col_date).value
+
+            if not cell_purch or not cell_tic or not cell_date:
+                continue
+
+            if str(cell_purch).strip().lower() != member.lower():
+                continue
+            if str(cell_tic).strip() != ticker:
+                continue
+
+            match_date = False
+            if isinstance(cell_date, datetime):
+                match_date = cell_date.date() == target_date
+            elif isinstance(cell_date, date):
+                match_date = cell_date == target_date
+            else:
+                match_date = str(cell_date).strip() == target_date.isoformat()
+
+            if match_date:
+                rows_to_delete.append(row)
+
+        if not rows_to_delete:
+            await update.message.reply_text(
+                "No matching rows found for that member, ticker, and date."
+            )
+            context.user_data.pop("removestock", None)
+            return ConversationHandler.END
+
+        # Delete from bottom to top so row indices remain valid
+        for r in sorted(rows_to_delete, reverse=True):
+            ws.delete_rows(r, 1)
+
+        wb.save(EXCEL_PATH)
+    except Exception as e:
+        logger.exception("Failed to remove stock rows")
+        await update.message.reply_text(f"Error removing stock rows: {e}")
+        context.user_data.pop("removestock", None)
+        return ConversationHandler.END
+
+    count = len(rows_to_delete)
+    await update.message.reply_text(
+        f"Removed {count} row(s) for {member}, ticker {ticker}, date {target_date.isoformat()}."
+    )
+    context.user_data.pop("removestock", None)
+    return ConversationHandler.END
+
+
+async def removestock_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("removestock", None)
+    await update.message.reply_text("Remove stock operation cancelled.")
+    return ConversationHandler.END
+
+
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Fetching latest prices, please wait...")
     try:
@@ -474,6 +701,7 @@ def help_text() -> str:
         "/update <ticker> <price> - Manually set a price\n"
         "/refresh - Fetch latest prices from Yahoo Finance\n"
         "/addstock - Guided flow to add a new stock position\n"
+        "/removestock - Guided flow to remove an existing stock row\n"
         "/help - Show this message"
     )
 
@@ -493,11 +721,23 @@ def main():
             ENTER_TICKER: [MessageHandler(filters.TEXT & ~filters.COMMAND, addstock_ticker)],
             ENTER_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, addstock_date)],
             ENTER_AMOUNT_ANY: [MessageHandler(filters.TEXT & ~filters.COMMAND, addstock_amount_any)],
+            ENTER_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, addstock_price)],
             SELECT_CURRENCY: [MessageHandler(filters.TEXT & ~filters.COMMAND, addstock_currency)],
             ENTER_AMOUNT_SGD: [MessageHandler(filters.TEXT & ~filters.COMMAND, addstock_amount_sgd)],
             SELECT_PLATFORM: [MessageHandler(filters.TEXT & ~filters.COMMAND, addstock_platform)],
         },
         fallbacks=[CommandHandler("cancel", addstock_cancel)],
+    )
+
+    removestock_conv = ConversationHandler(
+        entry_points=[CommandHandler("removestock", removestock_start)],
+        states={
+            REM_SELECT_MEMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, removestock_member)],
+            REM_SELECT_TICKER: [MessageHandler(filters.TEXT & ~filters.COMMAND, removestock_ticker)],
+            REM_ENTER_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, removestock_date)],
+            REM_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, removestock_confirm)],
+        },
+        fallbacks=[CommandHandler("cancel", removestock_cancel)],
     )
 
     app.add_handler(CommandHandler("start",     start_command))
@@ -508,6 +748,7 @@ def main():
     app.add_handler(CommandHandler("update",    update_command))
     app.add_handler(CommandHandler("refresh",   refresh_command))
     app.add_handler(addstock_conv)
+    app.add_handler(removestock_conv)
 
     logger.info("Bot started. Listening for commands...")
     app.run_polling()
