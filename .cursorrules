@@ -1,0 +1,42 @@
+# FunFamily Stock Bot — Project Context
+
+## Purpose
+Telegram bot for a private family investment group. Reads and writes an
+Excel portfolio file, fetches stock prices from Yahoo Finance, and
+responds to queries in a Telegram group chat.
+
+## Excel file
+- Filename: Funfamily_Stock_Tracker.xlsx
+- Sheet 1 "Deposit Sheet": member deposits and cash balances
+- Sheet 2 "Stock Sheet": individual stock positions
+- Key columns: Purchaser, Date of Purchase, Ticker, Platform,
+  Currency, Original Purchase Price, Holding Price (Any $),
+  Gross Holding Value (S$), Net Earning/Loss (S$)
+- Members: Shawn Mun, Jasmine
+- Platforms: Endowus (unit trusts), IBKR (stocks)
+
+## Yahoo Finance tickers
+- iShares S&P 500 (Endowus): 0P0001Q0TW.SI
+- TSMC (IBKR): TSM
+- MSFT (IBKR): MSFT
+
+## Tech stack
+- Python 3.11+
+- python-telegram-bot
+- yfinance
+- openpyxl
+- schedule
+- python-dotenv
+
+## Bot commands
+- /portfolio — full summary, all members
+- /mystocks Jasmine — one member's positions
+- /update MSFT 395.50 — manually update a price
+- /pnl — profit/loss per member
+- /help — list commands
+
+## Rules
+- All values displayed in SGD
+- Show P&L as SGD amount AND percentage
+- Keep replies short and mobile-readable
+- Daily price auto-update runs at 6pm SGT

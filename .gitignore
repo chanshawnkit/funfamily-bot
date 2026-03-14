@@ -1,0 +1,18 @@
+# Secret tokens — never upload these
+.env
+
+# Python junk files
+__pycache__/
+*.pyc
+*.pyo
+
+# Excel backup files
+*.xlsx.bak
+*.bak
+
+# Cursor settings
+.cursor/
+
+# OS junk
+.DS_Store
+Thumbs.db
