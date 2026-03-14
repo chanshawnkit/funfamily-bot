@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import date
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
@@ -16,6 +17,8 @@ EXCEL_PATH = os.path.join(os.path.dirname(__file__), "Funfamily_Stock_Tracker.xl
 STOCK_SHEET  = "Stock Sheet"
 DEPOSIT_SHEET = "Deposit Sheet"
 
+HEADER_ROW = 2  # Excel row containing column headers for Stock Sheet
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -28,6 +31,90 @@ def load_stock() -> pd.DataFrame:
     df = df.dropna(how="all")
     df = df[df["Ticker"].notna()]
     return df
+
+
+def append_stock_position(
+    purchaser: str,
+    purchase_date: date | str,
+    amount_any: float,
+    currency: str,
+    amount_sgd: float,
+    platform: str,
+    ticker: str,
+    product: str | None = None,
+    reference: str | None = None,
+) -> None:
+    """
+    Append a new stock position as a row in the Stock Sheet without modifying
+    existing data or headers.
+    """
+    wb = openpyxl_load(EXCEL_PATH)
+    if STOCK_SHEET not in wb.sheetnames:
+        raise RuntimeError(f"Sheet '{STOCK_SHEET}' not found in workbook")
+
+    ws = wb[STOCK_SHEET]
+
+    # Build a mapping from header name -> column index based on HEADER_ROW.
+    header_map: dict[str, int] = {}
+    for col in range(1, ws.max_column + 1):
+        val = ws.cell(row=HEADER_ROW, column=col).value
+        if val is None:
+            continue
+        header_name = str(val).strip()
+        if header_name:
+            header_map[header_name] = col
+
+    required_headers = [
+        "Purchaser",
+        "Date of Purchase",
+        "Original Purchase Quantum(Any $)",
+        "Currency",
+        "Original Purchase Quantum(S$)",
+        "Platform",
+        "Product",
+        "Ticker",
+        "Reference",
+        "Original Purchase Price (Any $)",
+        "Holding Price (Any $)",
+        "Gross Holding Value (S$)",
+        "Net Earning/Loss (S$)",
+    ]
+
+    missing = [h for h in required_headers if h not in header_map]
+    if missing:
+        raise RuntimeError(f"Missing expected columns in Stock Sheet: {', '.join(missing)}")
+
+    # Determine the next empty row after existing data.
+    next_row = ws.max_row + 1
+
+    def set_by_header(header: str, value):
+        col_idx = header_map.get(header)
+        if col_idx is not None:
+            ws.cell(row=next_row, column=col_idx).value = value
+
+    # Normalize date to a format consistent with existing rows.
+    if isinstance(purchase_date, date):
+        date_value = purchase_date
+    else:
+        date_value = str(purchase_date)
+
+    set_by_header("Purchaser", purchaser)
+    set_by_header("Date of Purchase", date_value)
+    set_by_header("Original Purchase Quantum(Any $)", float(amount_any))
+    set_by_header("Currency", currency)
+    set_by_header("Original Purchase Quantum(S$)", float(amount_sgd))
+    set_by_header("Platform", platform)
+    set_by_header("Product", product or "")
+    set_by_header("Ticker", ticker)
+    set_by_header("Reference", reference or "")
+
+    # Leave price/valuation columns blank initially; price updater will fill them.
+    set_by_header("Original Purchase Price (Any $)", None)
+    set_by_header("Holding Price (Any $)", None)
+    set_by_header("Gross Holding Value (S$)", None)
+    set_by_header("Net Earning/Loss (S$)", None)
+
+    wb.save(EXCEL_PATH)
 
 
 def fmt_sgd(val: float) -> str:
@@ -184,6 +271,99 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def addstock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /addstock <member> <ticker> <date> <amount_any> <currency> <amount_sgd> <platform>
+    Example:
+      /addstock "Shawn Mun" 0P0001Q0TW.SI 2026-03-15 5000 SGD 5000 Endowus
+    """
+    args = context.args or []
+    if len(args) < 7:
+        await update.message.reply_text(
+            "Usage: /addstock <member> <ticker> <date> <amount_any> <currency> <amount_sgd> <platform>\n"
+            'Example: /addstock "Shawn Mun" 0P0001Q0TW.SI 2026-03-15 5000 SGD 5000 Endowus'
+        )
+        return
+
+    # Support quoted member names with spaces, e.g. "Shawn Mun"
+    member_end_idx = 0
+    if args[0].startswith('"'):
+        for i, token in enumerate(args):
+            if token.endswith('"'):
+                member_end_idx = i
+                break
+        else:
+            await update.message.reply_text(
+                "Could not parse member name. If it contains spaces, wrap it in quotes."
+            )
+            return
+        member_tokens = args[0 : member_end_idx + 1]
+        member = " ".join(member_tokens).strip('"').strip()
+        remaining = args[member_end_idx + 1 :]
+    else:
+        member = args[0]
+        remaining = args[1:]
+
+    if len(remaining) < 6:
+        await update.message.reply_text(
+            "Usage: /addstock <member> <ticker> <date> <amount_any> <currency> <amount_sgd> <platform>\n"
+            'Example: /addstock "Shawn Mun" 0P0001Q0TW.SI 2026-03-15 5000 SGD 5000 Endowus'
+        )
+        return
+
+    ticker = remaining[0]
+    date_str = remaining[1]
+    amount_any_str = remaining[2]
+    currency = remaining[3].upper()
+    amount_sgd_str = remaining[4]
+    platform = " ".join(remaining[5:]).strip()
+
+    # Basic validation
+    try:
+        purchase_date = date.fromisoformat(date_str)
+    except ValueError:
+        await update.message.reply_text(
+            "Date must be in YYYY-MM-DD format, e.g. 2026-03-15."
+        )
+        return
+
+    try:
+        amount_any = float(amount_any_str)
+        amount_sgd = float(amount_sgd_str)
+    except ValueError:
+        await update.message.reply_text(
+            "Amounts must be numbers, e.g. 5000 or 5000.50."
+        )
+        return
+
+    allowed_currencies = {"SGD", "USD"}
+    if currency not in allowed_currencies:
+        await update.message.reply_text(
+            f"Currency must be one of: {', '.join(sorted(allowed_currencies))}."
+        )
+        return
+
+    try:
+        append_stock_position(
+            purchaser=member,
+            purchase_date=purchase_date,
+            amount_any=amount_any,
+            currency=currency,
+            amount_sgd=amount_sgd,
+            platform=platform,
+            ticker=ticker,
+        )
+    except Exception as e:
+        logger.exception("Failed to append stock position")
+        await update.message.reply_text(f"Error adding stock position: {e}")
+        return
+
+    await update.message.reply_text(
+        f"Added stock for {member}: {ticker} on {purchase_date.isoformat()} "
+        f"for {amount_any:.2f} {currency} ({amount_sgd:.2f} SGD) via {platform}."
+    )
+
+
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Fetching latest prices, please wait...")
     try:
@@ -200,6 +380,7 @@ def help_text() -> str:
         "/pnl - Profit & loss per member\n"
         "/update <ticker> <price> - Manually set a price\n"
         "/refresh - Fetch latest prices from Yahoo Finance\n"
+        "/addstock <member> <ticker> <date> <amount_any> <currency> <amount_sgd> <platform> - Add a new stock position\n"
         "/help - Show this message"
     )
 
@@ -219,6 +400,7 @@ def main():
     app.add_handler(CommandHandler("pnl",       pnl_command))
     app.add_handler(CommandHandler("update",    update_command))
     app.add_handler(CommandHandler("refresh",   refresh_command))
+    app.add_handler(CommandHandler("addstock",  addstock_command))
 
     logger.info("Bot started. Listening for commands...")
     app.run_polling()
