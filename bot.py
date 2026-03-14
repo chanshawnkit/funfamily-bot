@@ -2,11 +2,14 @@ import logging
 import os
 from datetime import date
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
 from telegram.ext import (
     Application,
     CommandHandler,
     ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
 )
 from price_updater import update_prices
 
@@ -18,6 +21,8 @@ STOCK_SHEET  = "Stock Sheet"
 DEPOSIT_SHEET = "Deposit Sheet"
 
 HEADER_ROW = 2  # Excel row containing column headers for Stock Sheet
+
+SELECT_MEMBER, ENTER_TICKER, ENTER_DATE, ENTER_AMOUNT_ANY, SELECT_CURRENCY, ENTER_AMOUNT_SGD, SELECT_PLATFORM = range(7)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -271,97 +276,185 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def addstock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /addstock <member> <ticker> <date> <amount_any> <currency> <amount_sgd> <platform>
-    Example:
-      /addstock "Shawn Mun" 0P0001Q0TW.SI 2026-03-15 5000 SGD 5000 Endowus
-    """
-    args = context.args or []
-    if len(args) < 7:
+async def addstock_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    df = load_stock()
+    members = sorted(df["Purchaser"].dropna().unique().tolist())
+    if not members:
         await update.message.reply_text(
-            "Usage: /addstock <member> <ticker> <date> <amount_any> <currency> <amount_sgd> <platform>\n"
-            'Example: /addstock "Shawn Mun" 0P0001Q0TW.SI 2026-03-15 5000 SGD 5000 Endowus'
+            "No existing members found in the stock sheet. Please add at least one row in Excel first."
         )
-        return
+        return ConversationHandler.END
 
-    # Support quoted member names with spaces, e.g. "Shawn Mun"
-    member_end_idx = 0
-    if args[0].startswith('"'):
-        for i, token in enumerate(args):
-            if token.endswith('"'):
-                member_end_idx = i
-                break
-        else:
-            await update.message.reply_text(
-                "Could not parse member name. If it contains spaces, wrap it in quotes."
-            )
-            return
-        member_tokens = args[0 : member_end_idx + 1]
-        member = " ".join(member_tokens).strip('"').strip()
-        remaining = args[member_end_idx + 1 :]
+    keyboard = [[m] for m in members]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+
+    context.user_data["addstock"] = {}
+    await update.message.reply_text(
+        "Please select a member:", reply_markup=reply_markup
+    )
+    return SELECT_MEMBER
+
+
+async def addstock_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    member = (update.message.text or "").strip()
+    if not member:
+        await update.message.reply_text("Please choose a member from the list.")
+        return SELECT_MEMBER
+
+    context.user_data.setdefault("addstock", {})["member"] = member
+    await update.message.reply_text(
+        "Please enter the ticker symbol (e.g. AAPL, 0P0001Q0TW.SI):",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return ENTER_TICKER
+
+
+async def addstock_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ticker = (update.message.text or "").strip()
+    if not ticker:
+        await update.message.reply_text("Ticker cannot be empty. Please enter a ticker:")
+        return ENTER_TICKER
+
+    context.user_data.setdefault("addstock", {})["ticker"] = ticker
+    await update.message.reply_text(
+        "Please enter the purchase date in YYYY-MM-DD format (e.g. 2026-03-15):"
+    )
+    return ENTER_DATE
+
+
+async def addstock_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    date_text = (update.message.text or "").strip()
+    try:
+        purchase_date = date.fromisoformat(date_text)
+    except ValueError:
+        await update.message.reply_text(
+            "Date must be in YYYY-MM-DD format, e.g. 2026-03-15. Please try again:"
+        )
+        return ENTER_DATE
+
+    context.user_data.setdefault("addstock", {})["purchase_date"] = purchase_date
+    await update.message.reply_text(
+        "Please enter the original purchase quantum (Any $), e.g. 5000:"
+    )
+    return ENTER_AMOUNT_ANY
+
+
+async def addstock_amount_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").replace(",", "").strip()
+    try:
+        amount_any = float(text)
+        if amount_any <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "Amount must be a positive number, e.g. 5000 or 5000.50. Please try again:"
+        )
+        return ENTER_AMOUNT_ANY
+
+    context.user_data.setdefault("addstock", {})["amount_any"] = amount_any
+
+    keyboard = [["SGD", "USD"]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    await update.message.reply_text(
+        "Please select the currency:", reply_markup=reply_markup
+    )
+    return SELECT_CURRENCY
+
+
+async def addstock_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    currency = (update.message.text or "").strip().upper()
+    allowed = {"SGD", "USD"}
+    if currency not in allowed:
+        await update.message.reply_text(
+            "Currency must be SGD or USD. Please tap one of the buttons:"
+        )
+        return SELECT_CURRENCY
+
+    context.user_data.setdefault("addstock", {})["currency"] = currency
+    await update.message.reply_text(
+        "Please enter the original purchase quantum in SGD, e.g. 5000:",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return ENTER_AMOUNT_SGD
+
+
+async def addstock_amount_sgd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").replace(",", "").strip()
+    try:
+        amount_sgd = float(text)
+        if amount_sgd <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "Amount in SGD must be a positive number, e.g. 5000 or 5000.50. Please try again:"
+        )
+        return ENTER_AMOUNT_SGD
+
+    context.user_data.setdefault("addstock", {})["amount_sgd"] = amount_sgd
+
+    df = load_stock()
+    platforms = sorted(df["Platform"].dropna().unique().tolist())
+    if platforms:
+        keyboard = [[p] for p in platforms]
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await update.message.reply_text(
+            "Please select the platform (or type a new one):", reply_markup=reply_markup
+        )
     else:
-        member = args[0]
-        remaining = args[1:]
-
-    if len(remaining) < 6:
         await update.message.reply_text(
-            "Usage: /addstock <member> <ticker> <date> <amount_any> <currency> <amount_sgd> <platform>\n"
-            'Example: /addstock "Shawn Mun" 0P0001Q0TW.SI 2026-03-15 5000 SGD 5000 Endowus'
+            "Please enter the platform (e.g. Endowus, IBKR):",
+            reply_markup=ReplyKeyboardRemove(),
         )
-        return
+    return SELECT_PLATFORM
 
-    ticker = remaining[0]
-    date_str = remaining[1]
-    amount_any_str = remaining[2]
-    currency = remaining[3].upper()
-    amount_sgd_str = remaining[4]
-    platform = " ".join(remaining[5:]).strip()
 
-    # Basic validation
-    try:
-        purchase_date = date.fromisoformat(date_str)
-    except ValueError:
+async def addstock_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    platform = (update.message.text or "").strip()
+    if not platform:
         await update.message.reply_text(
-            "Date must be in YYYY-MM-DD format, e.g. 2026-03-15."
+            "Platform cannot be empty. Please enter or select a platform:"
         )
-        return
+        return SELECT_PLATFORM
 
-    try:
-        amount_any = float(amount_any_str)
-        amount_sgd = float(amount_sgd_str)
-    except ValueError:
-        await update.message.reply_text(
-            "Amounts must be numbers, e.g. 5000 or 5000.50."
-        )
-        return
-
-    allowed_currencies = {"SGD", "USD"}
-    if currency not in allowed_currencies:
-        await update.message.reply_text(
-            f"Currency must be one of: {', '.join(sorted(allowed_currencies))}."
-        )
-        return
+    data = context.user_data.setdefault("addstock", {})
+    data["platform"] = platform
 
     try:
         append_stock_position(
-            purchaser=member,
-            purchase_date=purchase_date,
-            amount_any=amount_any,
-            currency=currency,
-            amount_sgd=amount_sgd,
-            platform=platform,
-            ticker=ticker,
+            purchaser=data["member"],
+            purchase_date=data["purchase_date"],
+            amount_any=data["amount_any"],
+            currency=data["currency"],
+            amount_sgd=data["amount_sgd"],
+            platform=data["platform"],
+            ticker=data["ticker"],
         )
     except Exception as e:
         logger.exception("Failed to append stock position")
-        await update.message.reply_text(f"Error adding stock position: {e}")
-        return
+        await update.message.reply_text(
+            f"Error adding stock position: {e}", reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
 
     await update.message.reply_text(
-        f"Added stock for {member}: {ticker} on {purchase_date.isoformat()} "
-        f"for {amount_any:.2f} {currency} ({amount_sgd:.2f} SGD) via {platform}."
+        (
+            f"Added stock for {data['member']}: {data['ticker']} on "
+            f"{data['purchase_date'].isoformat()} for "
+            f"{data['amount_any']:.2f} {data['currency']} "
+            f"({data['amount_sgd']:.2f} SGD) via {data['platform']}."
+        ),
+        reply_markup=ReplyKeyboardRemove(),
     )
+    context.user_data.pop("addstock", None)
+    return ConversationHandler.END
+
+
+async def addstock_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("addstock", None)
+    await update.message.reply_text(
+        "Add stock operation cancelled.", reply_markup=ReplyKeyboardRemove()
+    )
+    return ConversationHandler.END
 
 
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -380,7 +473,7 @@ def help_text() -> str:
         "/pnl - Profit & loss per member\n"
         "/update <ticker> <price> - Manually set a price\n"
         "/refresh - Fetch latest prices from Yahoo Finance\n"
-        "/addstock <member> <ticker> <date> <amount_any> <currency> <amount_sgd> <platform> - Add a new stock position\n"
+        "/addstock - Guided flow to add a new stock position\n"
         "/help - Show this message"
     )
 
@@ -393,6 +486,20 @@ def main():
 
     app = Application.builder().token(token).build()
 
+    addstock_conv = ConversationHandler(
+        entry_points=[CommandHandler("addstock", addstock_start)],
+        states={
+            SELECT_MEMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, addstock_member)],
+            ENTER_TICKER: [MessageHandler(filters.TEXT & ~filters.COMMAND, addstock_ticker)],
+            ENTER_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, addstock_date)],
+            ENTER_AMOUNT_ANY: [MessageHandler(filters.TEXT & ~filters.COMMAND, addstock_amount_any)],
+            SELECT_CURRENCY: [MessageHandler(filters.TEXT & ~filters.COMMAND, addstock_currency)],
+            ENTER_AMOUNT_SGD: [MessageHandler(filters.TEXT & ~filters.COMMAND, addstock_amount_sgd)],
+            SELECT_PLATFORM: [MessageHandler(filters.TEXT & ~filters.COMMAND, addstock_platform)],
+        },
+        fallbacks=[CommandHandler("cancel", addstock_cancel)],
+    )
+
     app.add_handler(CommandHandler("start",     start_command))
     app.add_handler(CommandHandler("help",      help_command))
     app.add_handler(CommandHandler("portfolio", portfolio_command))
@@ -400,7 +507,7 @@ def main():
     app.add_handler(CommandHandler("pnl",       pnl_command))
     app.add_handler(CommandHandler("update",    update_command))
     app.add_handler(CommandHandler("refresh",   refresh_command))
-    app.add_handler(CommandHandler("addstock",  addstock_command))
+    app.add_handler(addstock_conv)
 
     logger.info("Bot started. Listening for commands...")
     app.run_polling()
