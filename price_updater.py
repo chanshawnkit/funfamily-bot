@@ -1,161 +1,164 @@
 import datetime as dt
 import os
-from dataclasses import dataclass
 from typing import Dict, List
 
-import pandas as pd
 import yfinance as yf
+from openpyxl import load_workbook
 
 EXCEL_PATH = os.path.join(os.path.dirname(__file__), "Funfamily_Stock_Tracker.xlsx")
 STOCK_SHEET_NAME = "Stock Sheet"
-HEADER_ROW_INDEX = 2  # zero-based row index in Excel where the real headers live
 
+# Excel row numbers (1-based)
+HEADER_ROW = 2      # Row 2 contains column headers
+DATA_START_ROW = 3  # Row 3 onwards contains data
+
+# Map any ticker aliases to correct Yahoo Finance symbols
 TICKER_MAP: Dict[str, str] = {
     "TSMC": "TSM",
 }
 
-
-@dataclass
-class StockRow:
-    idx: int
-    purchaser: str
-    ticker: str
-    currency: str
-    original_quant_any: float
-    original_quant_sgd: float
-    original_price_any: float
+# Column positions in Excel (1-based)
+COL_TICKER         = 8
+COL_ORIG_QTY_ANY   = 3
+COL_ORIG_QTY_SGD   = 5
+COL_ORIG_PRICE_ANY = 10
+COL_HOLD_PRICE     = 11
+COL_GROSS_VALUE    = 12
+COL_NET_PNL        = 13
 
 
-def load_stock_sheet() -> pd.DataFrame:
+def get_cell_float(ws, row: int, col: int) -> float:
+    """Safely read a cell value as float, returning 0.0 if empty."""
+    val = ws.cell(row=row, column=col).value
+    try:
+        return float(val) if val is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def get_cell_str(ws, row: int, col: int) -> str:
+    """Safely read a cell value as string."""
+    val = ws.cell(row=row, column=col).value
+    return str(val).strip() if val is not None else ""
+
+
+def fetch_price(symbol: str) -> float | None:
     """
-    Load the stock sheet using the confirmed header row.
+    Fetch the latest closing price for a given Yahoo Finance symbol.
+    Returns the price as a float, or None if unavailable.
     """
-    # Header is at Excel row 3 (0-based index 2), but pandas expects
-    # the header argument as "row number containing column names"
-    # counting from 0 within the sheet data. Given the file structure,
-    # using header=1 correctly picks up the Purchaser/... header row.
-    df = pd.read_excel(EXCEL_PATH, sheet_name=STOCK_SHEET_NAME, header=1)
-    print(df.columns)  # debug: confirm columns read correctly
-    # Drop completely empty rows if any
-    df = df.dropna(how="all")
-    return df
+    yf_symbol = TICKER_MAP.get(symbol, symbol)
+    print(f"  Fetching {symbol} (as {yf_symbol}) ...")
+    try:
+        ticker = yf.Ticker(yf_symbol)
+        hist = ticker.history(period="5d")
 
+        if hist.empty:
+            print(f"  -> No data returned for {yf_symbol}")
+            return None
 
-def extract_rows(df: pd.DataFrame) -> List[StockRow]:
-    rows: List[StockRow] = []
-    for i, r in df.iterrows():
-        ticker = str(r.get("Ticker") or "").strip()
-        if not ticker:
-            continue
-        rows.append(
-            StockRow(
-                idx=i,
-                purchaser=str(r.get("Purchaser") or "").strip(),
-                ticker=ticker,
-                currency=str(r.get("Currency") or "").strip(),
-                original_quant_any=float(r.get("Original Purchase Quantum(Any $)", 0.0) or 0.0),
-                original_quant_sgd=float(r.get("Original Purchase Quantum(S$)", 0.0) or 0.0),
-                original_price_any=float(r.get("Original Purchase Price (Any $)", 0.0) or 0.0),
-            )
-        )
-    return rows
+        # Get last available close price as a plain Python float
+        raw = hist["Close"].dropna()
+        if raw.empty:
+            print(f"  -> Close column empty for {yf_symbol}")
+            return None
 
+        price = float(raw.values[-1])
+        print(f"  -> {symbol}: {price:.4f}")
+        return price
 
-def fetch_latest_prices(tickers: List[str]) -> Dict[str, float]:
-    """
-    Fetch latest close prices for all tickers via yfinance.
-    Returns a mapping ticker -> last close price.
-    """
-    unique = sorted({t for t in tickers if t})
-    prices: Dict[str, float] = {}
-    for symbol in unique:
-        # Apply mapping for tickers like TSMC -> TSM
-        yf_symbol = TICKER_MAP.get(symbol, symbol)
-        try:
-            # Special handling for 0P0001Q0TW.SI which may not have 1d data
-            if yf_symbol == "0P0001Q0TW.SI":
-                data = yf.download(yf_symbol, period="5d", interval="1d", progress=False)
-            else:
-                data = yf.download(yf_symbol, period="1d", interval="1d", progress=False)
-            if not data.empty:
-                close = float(data["Close"].dropna().iloc[-1])
-                prices[symbol] = close
-        except Exception:
-            # If a ticker fails, skip it; caller can decide how to handle missing prices.
-            continue
-    return prices
-
-
-def recompute_row_values(row: StockRow, new_price_any: float) -> Dict[str, float]:
-    """
-    Given a stock row and a new price in the original currency, compute:
-    - Holding Price (Any $)
-    - Gross Holding Value (S$)
-    - Net Earning/Loss (S$)
-    based on the observed data model in the Excel file.
-    """
-    if row.original_price_any <= 0 or row.original_quant_any <= 0 or row.original_quant_sgd <= 0:
-        return {}
-
-    # Approximate units purchased
-    units = row.original_quant_any / row.original_price_any
-
-    # Effective FX rate from original quantum any$ -> SGD
-    fx_rate = row.original_quant_sgd / row.original_quant_any
-
-    gross_value_sgd = units * new_price_any * fx_rate
-    net_pnl_sgd = gross_value_sgd - row.original_quant_sgd
-
-    return {
-        "Holding Price (Any $)": new_price_any,
-        "Gross Holding Value (S$)": gross_value_sgd,
-        "Net Earning/Loss (S$)": net_pnl_sgd,
-    }
+    except Exception as e:
+        print(f"  -> Error fetching {symbol}: {e}")
+        return None
 
 
 def update_prices() -> None:
     """
-    Main entry point: load the stock sheet, fetch latest prices from Yahoo Finance,
-    update the holding price and related SGD fields, and write back to Excel.
+    Main function:
+    1. Open the Excel workbook
+    2. Read all stock rows from the Stock Sheet
+    3. Fetch latest prices from Yahoo Finance
+    4. Update Holding Price, Gross Value and Net P&L cells
+    5. Save the workbook
     """
-    df = load_stock_sheet()
-    rows = extract_rows(df)
-    if not rows:
+    print(f"Opening: {EXCEL_PATH}")
+    wb = load_workbook(EXCEL_PATH)
+    ws = wb[STOCK_SHEET_NAME]
+
+    # Step 1 — collect unique tickers and their rows
+    ticker_rows: Dict[str, List[int]] = {}
+    row = DATA_START_ROW
+    while True:
+        ticker = get_cell_str(ws, row, COL_TICKER)
+        if not ticker:
+            break
+        if ticker not in ticker_rows:
+            ticker_rows[ticker] = []
+        ticker_rows[ticker].append(row)
+        row += 1
+
+    if not ticker_rows:
+        print("No stock rows found in sheet.")
         return
 
-    prices = fetch_latest_prices([r.ticker for r in rows])
+    print(f"Found tickers: {list(ticker_rows.keys())}")
 
-    for row in rows:
-        new_price = prices.get(row.ticker)
+    # Step 2 — fetch prices for all unique tickers
+    prices: Dict[str, float] = {}
+    for ticker in ticker_rows:
+        price = fetch_price(ticker)
+        if price is not None:
+            prices[ticker] = price
+
+    if not prices:
+        print("No prices fetched — nothing to update.")
+        return
+
+    # Step 3 — update each row
+    updated = 0
+    for ticker, excel_rows in ticker_rows.items():
+        new_price = prices.get(ticker)
         if new_price is None:
+            print(f"  Skipping {ticker} — no price available")
             continue
-        updates = recompute_row_values(row, new_price)
-        if not updates:
-            continue
-        for col, val in updates.items():
-            if col in df.columns:
-                df.at[row.idx, col] = val
 
-    # Write back to the same Excel file, preserving other sheets
-    book = pd.read_excel(EXCEL_PATH, sheet_name=None, header=None)
-    with pd.ExcelWriter(EXCEL_PATH, engine="openpyxl", mode="w") as writer:
-        for sheet_name, sheet_df in book.items():
-            if sheet_name == STOCK_SHEET_NAME:
-                # We need to restore the original structure: first two header rows, then data.
-                # Re-read stock sheet raw (no header) to get the top rows, then append updated data.
-                raw = sheet_df
-                header_rows = raw.iloc[:HEADER_ROW_INDEX, :]
-                # align columns with raw: we overwrite from HEADER_ROW_INDEX onwards
-                updated = df.reindex(columns=raw.columns)
-                combined = pd.concat([header_rows, updated], ignore_index=True)
-                combined.to_excel(writer, sheet_name=sheet_name, header=False, index=False)
-            else:
-                sheet_df.to_excel(writer, sheet_name=sheet_name, header=False, index=False)
+        for excel_row in excel_rows:
+            orig_qty_any   = get_cell_float(ws, excel_row, COL_ORIG_QTY_ANY)
+            orig_qty_sgd   = get_cell_float(ws, excel_row, COL_ORIG_QTY_SGD)
+            orig_price_any = get_cell_float(ws, excel_row, COL_ORIG_PRICE_ANY)
+
+            if orig_price_any <= 0 or orig_qty_any <= 0 or orig_qty_sgd <= 0:
+                print(f"  Row {excel_row}: skipping — missing original data")
+                continue
+
+            # Calculate units held and FX rate
+            units    = orig_qty_any / orig_price_any
+            fx_rate  = orig_qty_sgd / orig_qty_any
+
+            # Recalculate values
+            gross_sgd = units * new_price * fx_rate
+            net_pnl   = gross_sgd - orig_qty_sgd
+
+            # Write updated values back to Excel
+            ws.cell(row=excel_row, column=COL_HOLD_PRICE).value  = round(new_price, 4)
+            ws.cell(row=excel_row, column=COL_GROSS_VALUE).value = round(gross_sgd, 6)
+            ws.cell(row=excel_row, column=COL_NET_PNL).value     = round(net_pnl, 6)
+
+            print(
+                f"  Row {excel_row} ({ticker}): "
+                f"price={new_price:.4f}, "
+                f"gross={gross_sgd:.2f} SGD, "
+                f"P&L={net_pnl:.2f} SGD"
+            )
+            updated += 1
+
+    # Step 4 — save
+    wb.save(EXCEL_PATH)
+    print(f"\nUpdated {updated} rows. Saved to {EXCEL_PATH}")
 
 
 if __name__ == "__main__":
-    # Run a one-off update when the script is executed directly.
     print(f"[{dt.datetime.now()}] Running price updater...")
     update_prices()
-    print(f"[{dt.datetime.now()}] Price update complete.")
+    print(f"[{dt.datetime.now()}] Done.")
 
