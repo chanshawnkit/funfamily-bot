@@ -1,22 +1,20 @@
 import logging
 import os
-from typing import Dict, List, Tuple
+from dotenv import load_dotenv
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+)
+from price_updater import update_prices
 
 import pandas as pd
-from dotenv import load_dotenv
-from telegram import ParseMode, Update
-from telegram.ext import (
-    CallbackContext,
-    CommandHandler,
-    Filters,
-    MessageHandler,
-    Updater,
-)
+from openpyxl import load_workbook as openpyxl_load
 
 EXCEL_PATH = os.path.join(os.path.dirname(__file__), "Funfamily_Stock_Tracker.xlsx")
-STOCK_SHEET_NAME = "Stock Sheet"
-DEPOSIT_SHEET_NAME = "Deposit Sheet"
-HEADER_ROW_INDEX = 2  # zero-based row index where real headers start
+STOCK_SHEET  = "Stock Sheet"
+DEPOSIT_SHEET = "Deposit Sheet"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -25,301 +23,206 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def load_workbook() -> Dict[str, pd.DataFrame]:
-    """
-    Load both sheets.
-    """
-    # Stock sheet with proper headers
-    stock = pd.read_excel(
-        EXCEL_PATH,
-        sheet_name=STOCK_SHEET_NAME,
-        header=HEADER_ROW_INDEX,
-    ).dropna(how="all")
-
-    # Deposit sheet raw to capture both the summary and transaction areas
-    deposit_raw = pd.read_excel(EXCEL_PATH, sheet_name=DEPOSIT_SHEET_NAME, header=None)
-
-    return {"stock": stock, "deposit_raw": deposit_raw}
-
-
-def get_members(stock_df: pd.DataFrame) -> List[str]:
-    members = sorted(
-        {str(x).strip() for x in stock_df["Purchaser"].dropna().unique() if str(x).strip()}
-    )
-    return members
-
-
-def aggregate_member_pnl(stock_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aggregate per-member invested, market value, and P&L using stock rows only.
-    All values are in SGD, per .cursorrules.
-    """
-    grouped = (
-        stock_df.groupby("Purchaser", dropna=True)
-        .agg(
-            invested_sgd=("Original Purchase Quantum(S$)", "sum"),
-            market_value_sgd=("Gross Holding Value (S$)", "sum"),
-            pnl_sgd=("Net Earning/Loss (S$)", "sum"),
-        )
-        .reset_index()
-    )
-    grouped["pnl_pct"] = grouped.apply(
-        lambda r: (r["pnl_sgd"] / r["invested_sgd"] * 100.0) if r["invested_sgd"] else 0.0,
-        axis=1,
-    )
-    return grouped
-
-
-def format_currency(amount: float) -> str:
-    return f"S${amount:,.2f}"
-
-
-def format_pct(pct: float) -> str:
-    sign = "+" if pct > 0 else ""
-    return f"{sign}{pct:.2f}%"
-
-
-def build_portfolio_text(stock_df: pd.DataFrame) -> str:
-    summary = aggregate_member_pnl(stock_df)
-
-    lines: List[str] = []
-    lines.append("*Family Portfolio*")
-
-    total_invested = summary["invested_sgd"].sum()
-    total_value = summary["market_value_sgd"].sum()
-    total_pnl = summary["pnl_sgd"].sum()
-    total_pnl_pct = (total_pnl / total_invested * 100.0) if total_invested else 0.0
-
-    for _, row in summary.iterrows():
-        name = row["Purchaser"]
-        lines.append(
-            f"\n*{name}*\n"
-            f"Invested: {format_currency(row['invested_sgd'])}\n"
-            f"Value: {format_currency(row['market_value_sgd'])}\n"
-            f"P&L: {format_currency(row['pnl_sgd'])} ({format_pct(row['pnl_pct'])})"
-        )
-
-    lines.append(
-        f"\n*Total*\n"
-        f"Invested: {format_currency(total_invested)}\n"
-        f"Value: {format_currency(total_value)}\n"
-        f"P&L: {format_currency(total_pnl)} ({format_pct(total_pnl_pct)})"
-    )
-
-    return "\n".join(lines)
-
-
-def compute_units(row: pd.Series) -> float:
-    """
-    Approximate units from amount and price in original currency.
-    """
-    amt = float(row.get("Original Purchase Quantum(Any $)", 0.0) or 0.0)
-    price = float(row.get("Original Purchase Price (Any $)", 0.0) or 0.0)
-    if price <= 0:
-        return 0.0
-    return amt / price
-
-
-def build_member_positions_text(stock_df: pd.DataFrame, member: str) -> str:
-    f = stock_df[stock_df["Purchaser"].astype(str).str.strip().str.lower() == member.lower()]
-    if f.empty:
-        return f"No holdings found for *{member}*."
-
-    lines: List[str] = []
-    lines.append(f"*{member}'s Holdings*")
-
-    for _, r in f.iterrows():
-        ticker = str(r["Ticker"])
-        platform = str(r["Platform"])
-        product = str(r["Product"])
-        currency = str(r["Currency"])
-        units = compute_units(r)
-        price = float(r.get("Holding Price (Any $)", 0.0) or 0.0)
-        market_sgd = float(r.get("Gross Holding Value (S$)", 0.0) or 0.0)
-        invested_sgd = float(r.get("Original Purchase Quantum(S$)", 0.0) or 0.0)
-        pnl_sgd = float(r.get("Net Earning/Loss (S$)", 0.0) or 0.0)
-        pnl_pct = (pnl_sgd / invested_sgd * 100.0) if invested_sgd else 0.0
-
-        lines.append(
-            f"\n*{ticker}* ({platform})\n"
-            f"{product}\n"
-            f"Units: {units:.3f} ({currency})\n"
-            f"Price: {price:.4f} {currency}\n"
-            f"Value: {format_currency(market_sgd)}\n"
-            f"P&L: {format_currency(pnl_sgd)} ({format_pct(pnl_pct)})"
-        )
-
-    return "\n".join(lines)
-
-
-def parse_update_args(args: List[str]) -> Tuple[str, float]:
-    if len(args) != 2:
-        raise ValueError("Usage: /update TICKER PRICE")
-    ticker = args[0].strip()
-    try:
-        price = float(args[1])
-    except ValueError as exc:
-        raise ValueError("Price must be a number, e.g. 395.50") from exc
-    return ticker, price
-
-
-def apply_manual_price_update(stock_df: pd.DataFrame, ticker: str, price: float) -> pd.DataFrame:
-    """
-    Update holding price and recompute value and P&L for all rows matching ticker.
-    """
-    mask = stock_df["Ticker"].astype(str).str.strip().str.upper() == ticker.upper()
-    if not mask.any():
-        raise ValueError(f"No rows found for ticker {ticker}")
-
-    df = stock_df.copy()
-    for idx, row in df[mask].iterrows():
-        amt_any = float(row.get("Original Purchase Quantum(Any $)", 0.0) or 0.0)
-        amt_sgd = float(row.get("Original Purchase Quantum(S$)", 0.0) or 0.0)
-        orig_price_any = float(row.get("Original Purchase Price (Any $)", 0.0) or 0.0)
-        if amt_any <= 0 or amt_sgd <= 0 or orig_price_any <= 0:
-            continue
-
-        units = amt_any / orig_price_any
-        fx = amt_sgd / amt_any
-        gross_sgd = units * price * fx
-        pnl_sgd = gross_sgd - amt_sgd
-
-        df.at[idx, "Holding Price (Any $)"] = price
-        df.at[idx, "Gross Holding Value (S$)"] = gross_sgd
-        df.at[idx, "Net Earning/Loss (S$)"] = pnl_sgd
-
+def load_stock() -> pd.DataFrame:
+    df = pd.read_excel(EXCEL_PATH, sheet_name=STOCK_SHEET, header=1)
+    df = df.dropna(how="all")
+    df = df[df["Ticker"].notna()]
     return df
 
 
-def save_stock_sheet(updated_stock: pd.DataFrame) -> None:
-    """
-    Persist updated stock sheet back into the workbook, preserving other sheets
-    and header rows.
-    """
-    book = pd.read_excel(EXCEL_PATH, sheet_name=None, header=None)
-    raw_stock = book[STOCK_SHEET_NAME]
-    header_rows = raw_stock.iloc[:HEADER_ROW_INDEX, :]
-    updated_aligned = updated_stock.reindex(columns=raw_stock.columns)
+def fmt_sgd(val: float) -> str:
+    return f"S${val:,.2f}"
 
-    with pd.ExcelWriter(EXCEL_PATH, engine="openpyxl", mode="w") as writer:
-        for sheet_name, sheet_df in book.items():
-            if sheet_name == STOCK_SHEET_NAME:
-                combined = pd.concat([header_rows, updated_aligned], ignore_index=True)
-                combined.to_excel(writer, sheet_name=sheet_name, header=False, index=False)
-            else:
-                sheet_df.to_excel(writer, sheet_name=sheet_name, header=False, index=False)
+
+def fmt_pct(val: float) -> str:
+    sign = "+" if val >= 0 else ""
+    return f"{sign}{val:.2f}%"
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(help_text())
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(help_text())
+
+
+async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    df = load_stock()
+    grouped = df.groupby("Purchaser").agg(
+        invested=("Original Purchase Quantum(S$)", "sum"),
+        value=("Gross Holding Value (S$)", "sum"),
+        pnl=("Net Earning/Loss (S$)", "sum"),
+    ).reset_index()
+
+    lines = ["*Family Portfolio*\n"]
+    total_inv = total_val = total_pnl = 0.0
+
+    for _, r in grouped.iterrows():
+        pct = (r.pnl / r.invested * 100) if r.invested else 0
+        lines.append(
+            f"*{r.Purchaser}*\n"
+            f"Invested: {fmt_sgd(r.invested)}\n"
+            f"Value:    {fmt_sgd(r.value)}\n"
+            f"P&L:      {fmt_sgd(r.pnl)} ({fmt_pct(pct)})\n"
+        )
+        total_inv += r.invested
+        total_val += r.value
+        total_pnl += r.pnl
+
+    total_pct = (total_pnl / total_inv * 100) if total_inv else 0
+    lines.append(
+        f"*Total*\n"
+        f"Invested: {fmt_sgd(total_inv)}\n"
+        f"Value:    {fmt_sgd(total_val)}\n"
+        f"P&L:      {fmt_sgd(total_pnl)} ({fmt_pct(total_pct)})"
+    )
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def mystocks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /mystocks <name>\nExample: /mystocks Jasmine")
+        return
+
+    member = " ".join(context.args).strip()
+    df = load_stock()
+    rows = df[df["Purchaser"].str.strip().str.lower() == member.lower()]
+
+    if rows.empty:
+        await update.message.reply_text(f"No holdings found for {member}.")
+        return
+
+    lines = [f"*{member}'s Holdings*\n"]
+    for _, r in rows.iterrows():
+        qty   = float(r.get("Original Purchase Quantum(Any $)", 0) or 0)
+        price = float(r.get("Original Purchase Price (Any $)", 0) or 0)
+        units = qty / price if price > 0 else 0
+        hold  = float(r.get("Holding Price (Any $)", 0) or 0)
+        val   = float(r.get("Gross Holding Value (S$)", 0) or 0)
+        inv   = float(r.get("Original Purchase Quantum(S$)", 0) or 0)
+        pnl   = float(r.get("Net Earning/Loss (S$)", 0) or 0)
+        pct   = (pnl / inv * 100) if inv else 0
+
+        lines.append(
+            f"*{r['Ticker']}* ({r['Platform']})\n"
+            f"Units: {units:.3f}\n"
+            f"Price: {hold:.4f} {r['Currency']}\n"
+            f"Value: {fmt_sgd(val)}\n"
+            f"P&L:   {fmt_sgd(pnl)} ({fmt_pct(pct)})\n"
+        )
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def pnl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    df = load_stock()
+    grouped = df.groupby("Purchaser").agg(
+        invested=("Original Purchase Quantum(S$)", "sum"),
+        pnl=("Net Earning/Loss (S$)", "sum"),
+    ).reset_index()
+
+    lines = ["*P&L by Member*\n"]
+    for _, r in grouped.iterrows():
+        pct = (r.pnl / r.invested * 100) if r.invested else 0
+        lines.append(
+            f"*{r.Purchaser}*\n"
+            f"P&L: {fmt_sgd(r.pnl)} ({fmt_pct(pct)})\n"
+        )
+
+    total_pnl = grouped["pnl"].sum()
+    total_inv = grouped["invested"].sum()
+    total_pct = (total_pnl / total_inv * 100) if total_inv else 0
+    lines.append(f"*Total P&L*\n{fmt_sgd(total_pnl)} ({fmt_pct(total_pct)})")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) != 2:
+        await update.message.reply_text("Usage: /update TICKER PRICE\nExample: /update MSFT 395.50")
+        return
+    ticker = context.args[0].upper()
+    try:
+        price = float(context.args[1])
+    except ValueError:
+        await update.message.reply_text("Price must be a number, e.g. 395.50")
+        return
+
+    wb = openpyxl_load(EXCEL_PATH)
+    ws = wb[STOCK_SHEET]
+
+    updated = 0
+    row = 3
+    while True:
+        cell_ticker = ws.cell(row=row, column=8).value
+        if not cell_ticker:
+            break
+        if str(cell_ticker).strip().upper() == ticker:
+            orig_qty  = float(ws.cell(row=row, column=3).value or 0)
+            orig_sgd  = float(ws.cell(row=row, column=5).value or 0)
+            orig_price = float(ws.cell(row=row, column=10).value or 0)
+            if orig_price > 0 and orig_qty > 0 and orig_sgd > 0:
+                units = orig_qty / orig_price
+                fx    = orig_sgd / orig_qty
+                gross = units * price * fx
+                pnl   = gross - orig_sgd
+                ws.cell(row=row, column=11).value = round(price, 4)
+                ws.cell(row=row, column=12).value = round(gross, 6)
+                ws.cell(row=row, column=13).value = round(pnl, 6)
+                updated += 1
+        row += 1
+
+    if updated == 0:
+        await update.message.reply_text(f"Ticker {ticker} not found.")
+        return
+
+    wb.save(EXCEL_PATH)
+    await update.message.reply_text(
+        f"Updated {ticker} to {price:.4f}. {updated} row(s) saved."
+    )
+
+
+async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Fetching latest prices, please wait...")
+    try:
+        update_prices()
+        await update.message.reply_text("Prices updated successfully.")
+    except Exception as e:
+        await update.message.reply_text(f"Error updating prices: {e}")
 
 
 def help_text() -> str:
     return (
-        "/portfolio - Show full family portfolio summary\n"
-        "/mystocks <name> - Show one member's holdings (e.g. /mystocks Jasmine)\n"
-        "/update <ticker> <price> - Manually update a holding price (e.g. /update MSFT 395.50)\n"
-        "/pnl - Show P&L per member\n"
-        "/help - Show this help message"
+        "/portfolio - Full family portfolio summary\n"
+        "/mystocks <name> - One member's holdings\n"
+        "/pnl - Profit & loss per member\n"
+        "/update <ticker> <price> - Manually set a price\n"
+        "/refresh - Fetch latest prices from Yahoo Finance\n"
+        "/help - Show this message"
     )
 
 
-def start_command(update: Update, context: CallbackContext) -> None:
-    update.message.reply_text(help_text())
-
-
-def help_command(update: Update, context: CallbackContext) -> None:
-    update.message.reply_text(help_text())
-
-
-def portfolio_command(update: Update, context: CallbackContext) -> None:
-    book = load_workbook()
-    stock = book["stock"]
-    text = build_portfolio_text(stock)
-    update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-
-def mystocks_command(update: Update, context: CallbackContext) -> None:
-    if not context.args:
-        update.message.reply_text("Usage: /mystocks <member name>\nExample: /mystocks Jasmine")
-        return
-    member = " ".join(context.args).strip()
-    book = load_workbook()
-    stock = book["stock"]
-    text = build_member_positions_text(stock, member)
-    update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-
-def update_command(update: Update, context: CallbackContext) -> None:
-    try:
-        ticker, price = parse_update_args(context.args)
-    except ValueError as e:
-        update.message.reply_text(str(e))
-        return
-
-    book = load_workbook()
-    stock = book["stock"]
-    try:
-        updated = apply_manual_price_update(stock, ticker, price)
-    except ValueError as e:
-        update.message.reply_text(str(e))
-        return
-
-    save_stock_sheet(updated)
-
-    # Rebuild summary for feedback
-    text = build_member_positions_text(updated, member="")  # not used; show a short confirmation instead
-    update.message.reply_text(
-        f"Updated {ticker} price to {price:.4f}. Excel file saved.", parse_mode=ParseMode.MARKDOWN
-    )
-
-
-def pnl_command(update: Update, context: CallbackContext) -> None:
-    book = load_workbook()
-    stock = book["stock"]
-    summary = aggregate_member_pnl(stock)
-
-    lines: List[str] = []
-    lines.append("*P&L by Member*")
-    for _, row in summary.iterrows():
-        lines.append(
-            f"\n*{row['Purchaser']}*\n"
-            f"P&L: {format_currency(row['pnl_sgd'])} ({format_pct(row['pnl_pct'])})"
-        )
-
-    total_pnl = summary["pnl_sgd"].sum()
-    total_invested = summary["invested_sgd"].sum()
-    total_pct = (total_pnl / total_invested * 100.0) if total_invested else 0.0
-    lines.append(
-        f"\n*Total*\n"
-        f"P&L: {format_currency(total_pnl)} ({format_pct(total_pct)})"
-    )
-
-    update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
-
-
-def unknown_command(update: Update, context: CallbackContext) -> None:
-    update.message.reply_text("Unknown command. Type /help for available commands.")
-
-
-def main() -> None:
+def main():
     load_dotenv()
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is not set in .env")
+        raise RuntimeError("TELEGRAM_BOT_TOKEN not set in .env")
 
-    updater = Updater(token=token, use_context=True)
-    dp = updater.dispatcher
+    app = Application.builder().token(token).build()
 
-    dp.add_handler(CommandHandler("start", start_command))
-    dp.add_handler(CommandHandler("help", help_command))
-    dp.add_handler(CommandHandler("portfolio", portfolio_command))
-    dp.add_handler(CommandHandler("mystocks", mystocks_command))
-    dp.add_handler(CommandHandler("update", update_command))
-    dp.add_handler(CommandHandler("pnl", pnl_command))
-    dp.add_handler(MessageHandler(Filters.command, unknown_command))
+    app.add_handler(CommandHandler("start",     start_command))
+    app.add_handler(CommandHandler("help",      help_command))
+    app.add_handler(CommandHandler("portfolio", portfolio_command))
+    app.add_handler(CommandHandler("mystocks",  mystocks_command))
+    app.add_handler(CommandHandler("pnl",       pnl_command))
+    app.add_handler(CommandHandler("update",    update_command))
+    app.add_handler(CommandHandler("refresh",   refresh_command))
 
-    updater.start_polling()
     logger.info("Bot started. Listening for commands...")
-    updater.idle()
+    app.run_polling()
 
 
 if __name__ == "__main__":
     main()
-
