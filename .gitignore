@@ -3,6 +3,7 @@
 
 # Python junk files
 __pycache__/
+.venv/
 *.pyc
 *.pyo
 
@@ -16,3 +17,6 @@ __pycache__/
 # OS junk
 .DS_Store
 Thumbs.db
+
+# Local Codex inspection artifacts
+.codex-tools/

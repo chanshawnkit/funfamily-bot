@@ -1,6 +1,6 @@
-python-telegram-bot==13.15
+python-telegram-bot[job-queue]==22.8
 yfinance
 pandas
 openpyxl
 python-dotenv
-schedule
+anthropic
