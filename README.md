@@ -1,6 +1,6 @@
 # FunFamily Stock Bot
 
-A private Telegram bot for tracking the family's stock portfolio in Excel. It supports Telegram commands, natural-language questions through Anthropic, Yahoo Finance price refreshes, and a scheduled daily performance message for each family member and the combined portfolio.
+A private Telegram bot for tracking the family's stock portfolio. Production uses Telegram webhooks, Vercel Functions, and Postgres; local development can still use the original polling/Excel workflow.
 
 ## Features
 
@@ -9,7 +9,8 @@ A private Telegram bot for tracking the family's stock portfolio in Excel. It su
 - `/refresh` for Yahoo Finance prices and `/update` for manual prices
 - natural-language portfolio questions and actions
 - daily family/member report at a configurable Singapore time
-- Docker-ready deployment
+- Vercel webhook and secured Cron deployment
+- automatic first-run import of the supplied Excel workbook into an empty database
 
 ## Setup
 
@@ -21,16 +22,32 @@ A private Telegram bot for tracking the family's stock portfolio in Excel. It su
 
 The daily job defaults to `08:00` Asia/Singapore. Change `DAILY_UPDATE_TIME` using 24-hour `HH:MM` format. If `TELEGRAM_DAILY_CHAT_IDS` is empty, the bot still runs but daily messages are disabled.
 
-## Deployment
+## Deploy on Vercel
 
-Build and run the container from this repository:
+1. Import this GitHub repository into Vercel.
+2. Create a Postgres database (Vercel Marketplace/Neon or any reachable PostgreSQL service).
+3. Add every variable from `.env.example` to the Vercel Production environment. Use long random values for `TELEGRAM_WEBHOOK_SECRET` and `CRON_SECRET`.
+4. Set `DATABASE_URL` to the provider's pooled Postgres connection string. On the first request, the schema is created and the bundled workbook seeds the database if it is empty.
+5. Deploy the Production project and set `PUBLIC_BASE_URL` to its stable `https://...vercel.app` URL or custom domain.
+6. Register the webhook from a trusted local machine:
 
 ```sh
-docker build -t funfamily-bot .
-docker run --env-file .env funfamily-bot
+python scripts/set_webhook.py
 ```
 
-Use persistent storage for `Funfamily_Stock_Tracker.xlsx`; the bot updates that file as prices and positions change. GitHub stores the source, but a continuously running container host is still required for Telegram polling and daily jobs.
+7. Visit `/api/health` and then check Telegram's `getWebhookInfo` API. The daily report runs at `00:00 UTC` (08:00 Singapore) through `vercel.json`. Vercel Hobby may execute it within that hour rather than at the exact minute.
+
+The production endpoints are:
+
+- `POST /api/telegram`: validates Telegram's webhook secret, deduplicates update IDs, processes commands/natural language, and stores mutations in Postgres.
+- `GET /api/daily-update`: validates Vercel's `CRON_SECRET`, refreshes prices, and sends the family report.
+- `GET /api/health`: creates/checks the schema and confirms database connectivity.
+
+Position deletion is deliberately explicit: use `/mystocks <name>` to see database IDs, then `/remove <id> confirm`.
+
+## Local polling mode
+
+`python bot.py` remains available for local development and uses `Funfamily_Stock_Tracker.xlsx`. Do not run polling while the Telegram webhook is active; Telegram supports only one update-delivery mode at a time.
 
 ## Security
 

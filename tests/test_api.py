@@ -1,0 +1,54 @@
+import os
+import unittest
+from unittest.mock import AsyncMock, patch
+
+from fastapi.testclient import TestClient
+
+from api.index import app, command_reply
+import portfolio_db
+
+
+class ApiSecurityTests(unittest.TestCase):
+    def test_webhook_rejects_wrong_secret(self):
+        with patch.dict(os.environ, {"TELEGRAM_WEBHOOK_SECRET": "correct"}):
+            response = TestClient(app).post(
+                "/api/telegram",
+                headers={"X-Telegram-Bot-Api-Secret-Token": "wrong"},
+                json={"update_id": 1},
+            )
+        self.assertEqual(response.status_code, 401)
+
+    def test_cron_rejects_wrong_secret(self):
+        with patch.dict(os.environ, {"CRON_SECRET": "correct"}):
+            response = TestClient(app).get(
+                "/api/daily-update", headers={"Authorization": "Bearer wrong"}
+            )
+        self.assertEqual(response.status_code, 401)
+
+
+class CommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_portfolio_command_uses_database_summary(self):
+        with patch("api.index.asyncio.to_thread", new=AsyncMock(return_value="summary")):
+            self.assertEqual(await command_reply("/portfolio"), "summary")
+
+    async def test_remove_requires_explicit_confirmation(self):
+        reply = await command_reply("/remove 42")
+        self.assertIn("confirm", reply)
+
+
+class SummaryTests(unittest.TestCase):
+    def test_summary_aggregates_complete_positions(self):
+        rows = [
+            {"purchaser": "Jasmine", "amount_sgd": 1000.0,
+             "gross_value_sgd": 1100.0, "net_pnl_sgd": 100.0},
+            {"purchaser": "Jasmine", "amount_sgd": 500.0,
+             "gross_value_sgd": None, "net_pnl_sgd": None},
+        ]
+        with patch.object(portfolio_db, "positions", return_value=rows):
+            summary = portfolio_db.portfolio_summary()
+        self.assertIn("Jasmine: S$1,100.00", summary)
+        self.assertIn("P&L S$100.00 (+10.00%)", summary)
+
+
+if __name__ == "__main__":
+    unittest.main()
