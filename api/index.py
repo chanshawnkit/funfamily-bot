@@ -1,15 +1,23 @@
 import asyncio
 import hmac
 import os
+from contextlib import asynccontextmanager
 
 import anthropic
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 
 import portfolio_db as db
+from config import validate_anthropic_env
 
 
-app = FastAPI(title="FunFamily Stock Bot")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    validate_anthropic_env()
+    yield
+
+
+app = FastAPI(title="FunFamily Stock Bot", lifespan=lifespan)
 
 SYSTEM_PROMPT = (
     "You are the assistant for a private family investment portfolio. "
@@ -84,8 +92,8 @@ def execute_tool(name: str, values: dict) -> str:
 
 
 async def natural_language_reply(text: str) -> str:
-    client = anthropic.Anthropic(api_key=required_env("ANTHROPIC_API_KEY"))
-    model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
+    api_key, model = validate_anthropic_env()
+    client = anthropic.Anthropic(api_key=api_key)
     messages = [{"role": "user", "content": text}]
     response = await asyncio.to_thread(
         client.messages.create, model=model, max_tokens=1024,

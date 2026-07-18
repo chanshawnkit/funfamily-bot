@@ -1,5 +1,7 @@
 # Secret tokens — never upload these
 .env
+.env.*
+!.env.example
 
 # Python junk files
 __pycache__/

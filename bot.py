@@ -15,6 +15,7 @@ from telegram.ext import (
 )
 from price_updater import update_prices
 import anthropic
+from config import validate_anthropic_env
 
 import pandas as pd
 from openpyxl import load_workbook as openpyxl_load
@@ -697,9 +698,7 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def get_claude_client() -> anthropic.Anthropic:
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not configured")
+    api_key, _ = validate_anthropic_env()
     return anthropic.Anthropic(api_key=api_key)
 
 NL_SYSTEM_PROMPT = (
@@ -940,7 +939,7 @@ async def handle_natural_language(update: Update, context: ContextTypes.DEFAULT_
 
     try:
         claude_client = get_claude_client()
-        model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
+        _, model = validate_anthropic_env()
         response = await asyncio.to_thread(
             claude_client.messages.create,
             model=model,
@@ -1072,6 +1071,7 @@ def help_text() -> str:
 
 def main():
     load_dotenv()
+    validate_anthropic_env()
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN not set in .env")

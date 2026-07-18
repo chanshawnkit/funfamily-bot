@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from api.index import app, command_reply
 import portfolio_db
+from config import validate_anthropic_env
 
 
 class ApiSecurityTests(unittest.TestCase):
@@ -25,6 +26,20 @@ class ApiSecurityTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 401)
 
+
+class AnthropicConfigTests(unittest.TestCase):
+    def test_anthropic_environment_is_required(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "ANTHROPIC_API_KEY, ANTHROPIC_MODEL"):
+                validate_anthropic_env()
+
+    def test_anthropic_environment_is_returned(self):
+        values = {
+            "ANTHROPIC_API_KEY": "test-key",
+            "ANTHROPIC_MODEL": "claude-sonnet-4-5-20250929",
+        }
+        with patch.dict(os.environ, values, clear=True):
+            self.assertEqual(validate_anthropic_env(), ("test-key", values["ANTHROPIC_MODEL"]))
 
 class CommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_portfolio_command_uses_database_summary(self):
