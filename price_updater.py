@@ -72,6 +72,34 @@ def fetch_price(symbol: str) -> float | None:
         return None
 
 
+def fetch_quote(symbol: str) -> dict | None:
+    """Return the latest quote and day change for any Yahoo Finance ticker."""
+    yf_symbol = TICKER_MAP.get(symbol.upper(), symbol.upper())
+    try:
+        history = yf.Ticker(yf_symbol).history(period="5d")
+        if history.empty:
+            return None
+
+        closes = history["Close"].dropna()
+        if closes.empty:
+            return None
+
+        price = float(closes.iloc[-1])
+        prev_close = float(closes.iloc[-2]) if len(closes) >= 2 else price
+        change = price - prev_close
+        change_pct = (change / prev_close * 100) if prev_close else 0.0
+        return {
+            "symbol": yf_symbol,
+            "price": round(price, 4),
+            "prev_close": round(prev_close, 4),
+            "change": round(change, 4),
+            "change_pct": round(change_pct, 2),
+        }
+    except Exception as exc:
+        print(f"  -> Error fetching quote for {symbol}: {exc}")
+        return None
+
+
 def update_prices() -> None:
     """
     Main function:

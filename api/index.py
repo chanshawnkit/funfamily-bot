@@ -11,6 +11,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 
 import portfolio_db as db
 from config import validate_anthropic_env
+from price_updater import fetch_quote
 
 
 @asynccontextmanager
@@ -25,6 +26,8 @@ app = FastAPI(title="FunFamily Stock Bot", lifespan=lifespan)
 SYSTEM_PROMPT = (
     "You are the assistant for a private family investment portfolio. "
     "Use tools for all portfolio facts and changes; never invent figures. "
+    "For questions about tickers not in the portfolio, use get_market_quote; "
+    "it works for any Yahoo Finance stock or ETF ticker. "
     "Deleting a position requires its numeric ID and explicit confirmation in the user's current message. "
     "If either is missing, ask the user to send '/remove <position-id> confirm'. "
     "Keep Telegram replies concise and mobile-friendly. All totals are SGD unless stated."
@@ -55,6 +58,11 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {"ticker": {"type": "string"}, "price": {"type": "number"}}, "required": ["ticker", "price"]}},
     {"name": "refresh_all_prices", "description": "Refresh all prices from Yahoo Finance.",
      "input_schema": {"type": "object", "properties": {}, "required": []}},
+    {"name": "get_market_quote",
+     "description": "Get the latest available quote for any stock or ETF ticker, including symbols outside the family portfolio.",
+     "input_schema": {"type": "object", "properties": {
+         "ticker": {"type": "string", "description": "Yahoo Finance ticker symbol, e.g. SPY, QQQ, or AAPL"},
+     }, "required": ["ticker"]}},
 ]
 
 
@@ -150,6 +158,16 @@ def execute_tool(name: str, values: dict, can_trade: bool = False) -> str:
         count, missing = db.refresh_prices()
         suffix = f" Missing: {', '.join(missing)}." if missing else ""
         return f"Refreshed {count} position(s).{suffix}"
+    if name == "get_market_quote":
+        quote = fetch_quote(values["ticker"])
+        if quote is None:
+            return f"Could not find a quote for {values['ticker'].upper()}. Check the ticker symbol."
+        direction = "up" if quote["change"] >= 0 else "down"
+        return (
+            f"{quote['symbol']}: {quote['price']:.2f} "
+            f"({direction} {abs(quote['change']):.2f}, {quote['change_pct']:+.2f}%) "
+            f"vs previous close {quote['prev_close']:.2f}."
+        )
     raise ValueError(f"Unknown tool: {name}")
 
 

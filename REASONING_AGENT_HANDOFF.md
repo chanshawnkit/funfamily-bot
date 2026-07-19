@@ -91,6 +91,7 @@ The Vercel assistant exposes only the tools declared in `api/index.py`:
 - remove stock position (admin-only and confirmation-required)
 - update a ticker price
 - refresh all Yahoo Finance prices
+- latest available market quote for any Yahoo Finance stock/ETF ticker
 
 Tool authorization must remain enforced in Python, not only in the model prompt.
 

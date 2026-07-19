@@ -148,6 +148,42 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(trade_admin(456))
             self.assertFalse(trade_admin(789))
 
+    def test_market_quote_reports_positive_change(self):
+        with patch("api.index.fetch_quote") as mocked_fetch:
+            mocked_fetch.return_value = {
+                "symbol": "SPY", "price": 542.31, "prev_close": 538.90,
+                "change": 3.41, "change_pct": 0.63,
+            }
+            reply = execute_tool("get_market_quote", {"ticker": "spy"})
+        self.assertIn("SPY", reply)
+        self.assertIn("542.31", reply)
+        self.assertIn("up", reply)
+        mocked_fetch.assert_called_once_with("spy")
+
+    def test_market_quote_reports_negative_change(self):
+        with patch("api.index.fetch_quote") as mocked_fetch:
+            mocked_fetch.return_value = {
+                "symbol": "QQQ", "price": 480.10, "prev_close": 485.00,
+                "change": -4.90, "change_pct": -1.01,
+            }
+            reply = execute_tool("get_market_quote", {"ticker": "qqq"})
+        self.assertIn("down", reply)
+        self.assertIn("-1.01", reply)
+
+    def test_market_quote_handles_unknown_ticker(self):
+        with patch("api.index.fetch_quote", return_value=None):
+            reply = execute_tool("get_market_quote", {"ticker": "NOTAREALTICKER"})
+        self.assertIn("Could not find a quote", reply)
+
+    def test_market_quote_is_available_to_non_admins(self):
+        with patch("api.index.fetch_quote") as mocked_fetch:
+            mocked_fetch.return_value = {
+                "symbol": "SPY", "price": 500.0, "prev_close": 500.0,
+                "change": 0.0, "change_pct": 0.0,
+            }
+            reply = execute_tool("get_market_quote", {"ticker": "SPY"}, can_trade=False)
+        self.assertIn("SPY", reply)
+
 
 class SummaryTests(unittest.TestCase):
     def test_summary_aggregates_complete_positions(self):
