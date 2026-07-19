@@ -2,6 +2,16 @@
 name = "funfamily-bot"
 version = "2.0.0"
 requires-python = ">=3.12"
+dependencies = [
+    "python-telegram-bot[job-queue]==22.8",
+    "yfinance",
+    "pandas",
+    "openpyxl",
+    "python-dotenv",
+    "anthropic",
+    "fastapi>=0.117.1",
+    "psycopg[binary]>=3.2",
+]
 
 [tool.vercel]
 entrypoint = "api.index:app"

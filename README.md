@@ -53,6 +53,8 @@ python scripts/set_webhook.py
 
 7. Visit `/api/health` and then check Telegram's `getWebhookInfo` API. The daily report runs at `00:00 UTC` (08:00 Singapore) through `vercel.json`. Vercel Hobby may execute it within that hour rather than at the exact minute.
 
+Vercel installs production dependencies from `pyproject.toml`; keep its dependency list aligned with `requirements.txt` when packages change.
+
 The production endpoints are:
 
 - `POST /api/telegram`: validates Telegram's webhook secret, deduplicates update IDs, processes commands/natural language, and stores mutations in Postgres.
