@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
-from api.index import app, command_reply
+from api.index import app, command_reply, execute_tool, trade_admin
 import portfolio_db
 from config import validate_anthropic_env
 
@@ -62,8 +62,23 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await command_reply("/portfolio"), "summary")
 
     async def test_remove_requires_explicit_confirmation(self):
-        reply = await command_reply("/remove 42")
+        reply = await command_reply("/remove 42", can_trade=True)
         self.assertIn("confirm", reply)
+
+    async def test_remove_is_restricted_to_trade_admin(self):
+        reply = await command_reply("/remove 42 confirm", can_trade=False)
+        self.assertIn("Only Chan Shawn Kit", reply)
+
+    def test_purchase_tool_is_restricted_to_trade_admin(self):
+        with patch.object(portfolio_db, "add_position") as add_position:
+            reply = execute_tool("add_stock_position", {}, can_trade=False)
+        self.assertIn("Only Chan Shawn Kit", reply)
+        add_position.assert_not_called()
+
+    def test_trade_admin_uses_telegram_user_id(self):
+        with patch.dict(os.environ, {"TELEGRAM_TRADE_ADMIN_USER_IDS": "123,456"}):
+            self.assertTrue(trade_admin(456))
+            self.assertFalse(trade_admin(789))
 
 
 class SummaryTests(unittest.TestCase):

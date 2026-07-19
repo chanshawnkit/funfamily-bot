@@ -14,6 +14,7 @@ from config import validate_anthropic_env
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     validate_anthropic_env()
+    trade_admin_ids()
     yield
 
 
@@ -24,6 +25,8 @@ SYSTEM_PROMPT = (
     "Use tools for all portfolio facts and changes; never invent figures. "
     "Keep Telegram replies concise and mobile-friendly. All totals are SGD unless stated."
 )
+
+TRADE_ADMIN_MESSAGE = "Only Chan Shawn Kit can record purchases or sales."
 
 TOOLS = [
     {"name": "get_portfolio_summary", "description": "Get the family portfolio summary.",
@@ -58,6 +61,21 @@ def allowed_chat(chat_id: int) -> bool:
     return chat_id in allowed
 
 
+def trade_admin_ids() -> set[int]:
+    raw = required_env("TELEGRAM_TRADE_ADMIN_USER_IDS")
+    try:
+        admins = {int(value.strip()) for value in raw.split(",") if value.strip()}
+    except ValueError as exc:
+        raise RuntimeError("TELEGRAM_TRADE_ADMIN_USER_IDS must contain numeric Telegram user IDs") from exc
+    if not admins:
+        raise RuntimeError("TELEGRAM_TRADE_ADMIN_USER_IDS must contain at least one Telegram user ID")
+    return admins
+
+
+def trade_admin(user_id: int) -> bool:
+    return user_id in trade_admin_ids()
+
+
 async def telegram_request(method: str, payload: dict) -> dict:
     token = required_env("TELEGRAM_BOT_TOKEN")
     async with httpx.AsyncClient(timeout=30) as client:
@@ -73,12 +91,27 @@ async def send_message(chat_id: int, text: str) -> None:
     await telegram_request("sendMessage", {"chat_id": chat_id, "text": text[:4096]})
 
 
-def execute_tool(name: str, values: dict) -> str:
+async def set_processing_reaction(chat_id: int, message_id: int, active: bool) -> None:
+    """Set or clear a best-effort processing reaction on an incoming message."""
+    reaction = [{"type": "emoji", "emoji": "👀"}] if active else []
+    try:
+        await telegram_request(
+            "setMessageReaction",
+            {"chat_id": chat_id, "message_id": message_id, "reaction": reaction},
+        )
+    except Exception:
+        # Reactions can be disabled per-chat; that must not block bot processing.
+        return
+
+
+def execute_tool(name: str, values: dict, can_trade: bool = False) -> str:
     if name == "get_portfolio_summary":
         return db.portfolio_summary()
     if name == "get_member_holdings":
         return db.portfolio_summary(values["member"], detailed=True)
     if name == "add_stock_position":
+        if not can_trade:
+            return TRADE_ADMIN_MESSAGE
         position_id = db.add_position(values)
         return f"Added position #{position_id} for {values['member']}: {values['ticker'].upper()}."
     if name == "update_stock_price":
@@ -91,7 +124,7 @@ def execute_tool(name: str, values: dict) -> str:
     raise ValueError(f"Unknown tool: {name}")
 
 
-async def natural_language_reply(text: str) -> str:
+async def natural_language_reply(text: str, can_trade: bool = False) -> str:
     api_key, model, base_url = validate_anthropic_env()
     client = anthropic.Anthropic(api_key=api_key, base_url=base_url)
     messages = [{"role": "user", "content": text}]
@@ -104,7 +137,7 @@ async def natural_language_reply(text: str) -> str:
         results = []
         for block in response.content:
             if block.type == "tool_use":
-                result = await asyncio.to_thread(execute_tool, block.name, block.input)
+                result = await asyncio.to_thread(execute_tool, block.name, block.input, can_trade)
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
         messages.append({"role": "user", "content": results})
         response = await asyncio.to_thread(
@@ -114,7 +147,7 @@ async def natural_language_reply(text: str) -> str:
     return "".join(block.text for block in response.content if block.type == "text") or "Done."
 
 
-async def command_reply(text: str) -> str:
+async def command_reply(text: str, can_trade: bool = False) -> str:
     command, *arguments = text.strip().split()
     command = command.split("@", 1)[0].lower()
     if command in {"/start", "/help"}:
@@ -139,6 +172,8 @@ async def command_reply(text: str) -> str:
         count, missing = await asyncio.to_thread(db.refresh_prices)
         return f"Refreshed {count} position(s)." + (f" Missing: {', '.join(missing)}." if missing else "")
     if command == "/remove":
+        if not can_trade:
+            return TRADE_ADMIN_MESSAGE
         if len(arguments) != 2 or arguments[1].lower() != "confirm":
             return "Usage: /remove <position-id> confirm. Find IDs with /mystocks <name>."
         removed = await asyncio.to_thread(db.remove_position, int(arguments[0]))
@@ -153,11 +188,22 @@ async def handle_message(message: dict) -> None:
     text = message.get("text", "").strip()
     if not text:
         return
+    message_id = int(message["message_id"])
+    user_id = int(message.get("from", {}).get("id", 0))
+    can_trade = trade_admin(user_id)
+    await set_processing_reaction(chat_id, message_id, True)
     try:
-        reply = await command_reply(text) if text.startswith("/") else await natural_language_reply(text)
-    except (TypeError, ValueError) as exc:
-        reply = f"I couldn't understand that value: {exc}"
-    await send_message(chat_id, reply)
+        try:
+            reply = (
+                await command_reply(text, can_trade)
+                if text.startswith("/")
+                else await natural_language_reply(text, can_trade)
+            )
+        except (TypeError, ValueError) as exc:
+            reply = f"I couldn't understand that value: {exc}"
+        await send_message(chat_id, reply)
+    finally:
+        await set_processing_reaction(chat_id, message_id, False)
 
 
 @app.get("/api/health")
