@@ -4,7 +4,15 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
-from api.index import app, command_reply, execute_tool, set_processing_reaction, trade_admin
+from api.index import (
+    app,
+    command_reply,
+    execute_tool,
+    send_message,
+    set_processing_reaction,
+    telegram_html,
+    trade_admin,
+)
 import portfolio_db
 from config import validate_anthropic_env
 
@@ -57,6 +65,24 @@ class AnthropicConfigTests(unittest.TestCase):
             )
 
 class CommandTests(unittest.IsolatedAsyncioTestCase):
+    def test_telegram_html_converts_bold_and_escapes_other_markup(self):
+        self.assertEqual(
+            telegram_html("Found **#7 AAPL** & <unsafe>"),
+            "Found <b>#7 AAPL</b> &amp; &lt;unsafe&gt;",
+        )
+
+    async def test_send_message_uses_telegram_html_mode(self):
+        with patch("api.index.telegram_request", new=AsyncMock()) as telegram_request:
+            await send_message(-5235714051, "Hello **family**")
+        telegram_request.assert_awaited_once_with(
+            "sendMessage",
+            {
+                "chat_id": -5235714051,
+                "text": "Hello <b>family</b>",
+                "parse_mode": "HTML",
+            },
+        )
+
     async def test_processing_reaction_sets_persistent_look_emoji(self):
         with patch("api.index.telegram_request", new=AsyncMock()) as telegram_request:
             await set_processing_reaction(-5235714051, 99)

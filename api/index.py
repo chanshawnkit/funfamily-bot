@@ -1,6 +1,8 @@
 import asyncio
 import hmac
+import html
 import os
+import re
 from contextlib import asynccontextmanager
 
 import anthropic
@@ -95,8 +97,17 @@ async def telegram_request(method: str, payload: dict) -> dict:
         return result
 
 
+def telegram_html(text: str) -> str:
+    """Safely convert the model's **bold** markers to Telegram HTML."""
+    escaped = html.escape(text, quote=False)
+    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped, flags=re.DOTALL)
+
+
 async def send_message(chat_id: int, text: str) -> None:
-    await telegram_request("sendMessage", {"chat_id": chat_id, "text": text[:4096]})
+    await telegram_request(
+        "sendMessage",
+        {"chat_id": chat_id, "text": telegram_html(text[:4096]), "parse_mode": "HTML"},
+    )
 
 
 async def set_processing_reaction(chat_id: int, message_id: int) -> None:
