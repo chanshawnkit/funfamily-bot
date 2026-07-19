@@ -92,8 +92,8 @@ def execute_tool(name: str, values: dict) -> str:
 
 
 async def natural_language_reply(text: str) -> str:
-    api_key, model = validate_anthropic_env()
-    client = anthropic.Anthropic(api_key=api_key)
+    api_key, model, base_url = validate_anthropic_env()
+    client = anthropic.Anthropic(api_key=api_key, base_url=base_url)
     messages = [{"role": "user", "content": text}]
     response = await asyncio.to_thread(
         client.messages.create, model=model, max_tokens=1024,

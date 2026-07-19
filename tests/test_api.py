@@ -36,10 +36,25 @@ class AnthropicConfigTests(unittest.TestCase):
     def test_anthropic_environment_is_returned(self):
         values = {
             "ANTHROPIC_API_KEY": "test-key",
-            "ANTHROPIC_MODEL": "claude-sonnet-4-5-20250929",
+            "ANTHROPIC_MODEL": "claude-sonnet-5",
         }
         with patch.dict(os.environ, values, clear=True):
-            self.assertEqual(validate_anthropic_env(), ("test-key", values["ANTHROPIC_MODEL"]))
+            self.assertEqual(
+                validate_anthropic_env(),
+                ("test-key", values["ANTHROPIC_MODEL"], "https://api.anthropic.com"),
+            )
+
+    def test_anthropic_environment_respects_custom_base_url(self):
+        values = {
+            "ANTHROPIC_API_KEY": "sk-or-test-key",
+            "ANTHROPIC_MODEL": "claude-sonnet-5",
+            "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+        }
+        with patch.dict(os.environ, values, clear=True):
+            self.assertEqual(
+                validate_anthropic_env(),
+                ("sk-or-test-key", "claude-sonnet-5", "https://openrouter.ai/api"),
+            )
 
 class CommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_portfolio_command_uses_database_summary(self):

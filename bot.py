@@ -698,8 +698,8 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def get_claude_client() -> anthropic.Anthropic:
-    api_key, _ = validate_anthropic_env()
-    return anthropic.Anthropic(api_key=api_key)
+    api_key, _, base_url = validate_anthropic_env()
+    return anthropic.Anthropic(api_key=api_key, base_url=base_url)
 
 NL_SYSTEM_PROMPT = (
     "You are the assistant for FunFamily Stock Bot, a family investment portfolio "
@@ -939,7 +939,7 @@ async def handle_natural_language(update: Update, context: ContextTypes.DEFAULT_
 
     try:
         claude_client = get_claude_client()
-        _, model = validate_anthropic_env()
+        _, model, _ = validate_anthropic_env()
         response = await asyncio.to_thread(
             claude_client.messages.create,
             model=model,

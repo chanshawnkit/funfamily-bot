@@ -36,10 +36,13 @@ In the Vercel dashboard, open **FunFamily Bot project → Settings → Environme
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | Your Anthropic Console API key | Production |
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-5-20250929` | Production |
+| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Production |
 
 Treat `ANTHROPIC_API_KEY` as sensitive and do not paste it into source files, `vercel.json`, GitHub, or `.env.example`. If you test Preview deployments, add separate values to **Preview** as well. Environment-variable changes only affect new deployments, so open **Deployments**, select the latest deployment, and choose **Redeploy** after saving them.
 
 The FastAPI lifespan validates both variables before accepting traffic. Local polling mode performs the same validation after loading the untracked `.env` file.
+
+To route requests through OpenRouter instead, set `ANTHROPIC_API_KEY` to your OpenRouter key, set `ANTHROPIC_BASE_URL=https://openrouter.ai/api`, and select an Anthropic model identifier supported by OpenRouter in `ANTHROPIC_MODEL`. The base URL is optional and continues to default to Anthropic's API.
 4. Set `DATABASE_URL` to the provider's pooled Postgres connection string. On the first request, the schema is created and the bundled workbook seeds the database if it is empty.
 5. Deploy the Production project and set `PUBLIC_BASE_URL` to its stable `https://...vercel.app` URL or custom domain.
 6. Register the webhook from a trusted local machine:
