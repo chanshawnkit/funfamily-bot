@@ -75,6 +75,36 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Only Chan Shawn Kit", reply)
         add_position.assert_not_called()
 
+    def test_natural_language_delete_is_restricted_to_trade_admin(self):
+        with patch.object(portfolio_db, "remove_position") as remove_position:
+            reply = execute_tool(
+                "remove_stock_position",
+                {"position_id": 7, "confirmed": True},
+                can_trade=False,
+            )
+        self.assertIn("Only Chan Shawn Kit", reply)
+        remove_position.assert_not_called()
+
+    def test_natural_language_delete_requires_confirmation(self):
+        with patch.object(portfolio_db, "remove_position") as remove_position:
+            reply = execute_tool(
+                "remove_stock_position",
+                {"position_id": 7, "confirmed": False},
+                can_trade=True,
+            )
+        self.assertIn("/remove 7 confirm", reply)
+        remove_position.assert_not_called()
+
+    def test_confirmed_natural_language_delete_removes_position(self):
+        with patch.object(portfolio_db, "remove_position", return_value=True) as remove_position:
+            reply = execute_tool(
+                "remove_stock_position",
+                {"position_id": 7, "confirmed": True},
+                can_trade=True,
+            )
+        self.assertEqual(reply, "Position removed.")
+        remove_position.assert_called_once_with(7)
+
     def test_trade_admin_uses_telegram_user_id(self):
         with patch.dict(os.environ, {"TELEGRAM_TRADE_ADMIN_USER_IDS": "123,456"}):
             self.assertTrue(trade_admin(456))

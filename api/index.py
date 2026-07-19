@@ -23,6 +23,8 @@ app = FastAPI(title="FunFamily Stock Bot", lifespan=lifespan)
 SYSTEM_PROMPT = (
     "You are the assistant for a private family investment portfolio. "
     "Use tools for all portfolio facts and changes; never invent figures. "
+    "Deleting a position requires its numeric ID and explicit confirmation in the user's current message. "
+    "If either is missing, ask the user to send '/remove <position-id> confirm'. "
     "Keep Telegram replies concise and mobile-friendly. All totals are SGD unless stated."
 )
 
@@ -41,6 +43,12 @@ TOOLS = [
          "amount_sgd": {"type": "number"}, "price_any": {"type": "number"},
          "platform": {"type": "string"}, "product": {"type": "string"},
      }, "required": ["member", "ticker", "purchase_date", "amount_any", "currency", "amount_sgd", "price_any", "platform"]}},
+    {"name": "remove_stock_position",
+     "description": "Permanently remove a test or erroneous position only after the user explicitly confirms deletion in the current message.",
+     "input_schema": {"type": "object", "properties": {
+         "position_id": {"type": "integer", "description": "Numeric database position ID"},
+         "confirmed": {"type": "boolean", "description": "True only when the current user message explicitly confirms deletion"},
+     }, "required": ["position_id", "confirmed"]}},
     {"name": "update_stock_price", "description": "Set the current price for every position with a ticker.",
      "input_schema": {"type": "object", "properties": {"ticker": {"type": "string"}, "price": {"type": "number"}}, "required": ["ticker", "price"]}},
     {"name": "refresh_all_prices", "description": "Refresh all prices from Yahoo Finance.",
@@ -114,6 +122,13 @@ def execute_tool(name: str, values: dict, can_trade: bool = False) -> str:
             return TRADE_ADMIN_MESSAGE
         position_id = db.add_position(values)
         return f"Added position #{position_id} for {values['member']}: {values['ticker'].upper()}."
+    if name == "remove_stock_position":
+        if not can_trade:
+            return TRADE_ADMIN_MESSAGE
+        if not values.get("confirmed"):
+            return f"Deletion not confirmed. Send /remove {int(values['position_id'])} confirm."
+        removed = db.remove_position(int(values["position_id"]))
+        return "Position removed." if removed else "Position ID not found."
     if name == "update_stock_price":
         count = db.update_ticker_price(values["ticker"], float(values["price"]))
         return f"Updated {count} position(s) for {values['ticker'].upper()}."
