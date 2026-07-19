@@ -58,7 +58,7 @@ Vercel installs production dependencies from `pyproject.toml`; keep its dependen
 The production endpoints are:
 
 - `POST /api/telegram`: validates Telegram's webhook secret, deduplicates update IDs, processes commands/natural language, and stores mutations in Postgres.
-- Incoming Telegram messages receive a temporary 👀 reaction while they are being processed.
+- Incoming Telegram messages receive a 👀 acknowledgement reaction that remains after processing.
 - Everyone in `TELEGRAM_ALLOWED_CHAT_IDS` can query the portfolio. Only Telegram user IDs listed in `TELEGRAM_TRADE_ADMIN_USER_IDS` can record purchases or remove positions.
 - `GET /api/daily-update`: validates Vercel's `CRON_SECRET`, refreshes prices, and sends the family report.
 - `GET /api/health`: creates/checks the schema and confirms database connectivity.

@@ -99,13 +99,16 @@ async def send_message(chat_id: int, text: str) -> None:
     await telegram_request("sendMessage", {"chat_id": chat_id, "text": text[:4096]})
 
 
-async def set_processing_reaction(chat_id: int, message_id: int, active: bool) -> None:
-    """Set or clear a best-effort processing reaction on an incoming message."""
-    reaction = [{"type": "emoji", "emoji": "👀"}] if active else []
+async def set_processing_reaction(chat_id: int, message_id: int) -> None:
+    """Leave a best-effort acknowledgement reaction on an incoming message."""
     try:
         await telegram_request(
             "setMessageReaction",
-            {"chat_id": chat_id, "message_id": message_id, "reaction": reaction},
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "reaction": [{"type": "emoji", "emoji": "👀"}],
+            },
         )
     except Exception:
         # Reactions can be disabled per-chat; that must not block bot processing.
@@ -206,19 +209,16 @@ async def handle_message(message: dict) -> None:
     message_id = int(message["message_id"])
     user_id = int(message.get("from", {}).get("id", 0))
     can_trade = trade_admin(user_id)
-    await set_processing_reaction(chat_id, message_id, True)
+    await set_processing_reaction(chat_id, message_id)
     try:
-        try:
-            reply = (
-                await command_reply(text, can_trade)
-                if text.startswith("/")
-                else await natural_language_reply(text, can_trade)
-            )
-        except (TypeError, ValueError) as exc:
-            reply = f"I couldn't understand that value: {exc}"
-        await send_message(chat_id, reply)
-    finally:
-        await set_processing_reaction(chat_id, message_id, False)
+        reply = (
+            await command_reply(text, can_trade)
+            if text.startswith("/")
+            else await natural_language_reply(text, can_trade)
+        )
+    except (TypeError, ValueError) as exc:
+        reply = f"I couldn't understand that value: {exc}"
+    await send_message(chat_id, reply)
 
 
 @app.get("/api/health")

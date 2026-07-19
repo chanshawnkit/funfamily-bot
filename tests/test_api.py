@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
-from api.index import app, command_reply, execute_tool, trade_admin
+from api.index import app, command_reply, execute_tool, set_processing_reaction, trade_admin
 import portfolio_db
 from config import validate_anthropic_env
 
@@ -57,6 +57,18 @@ class AnthropicConfigTests(unittest.TestCase):
             )
 
 class CommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_processing_reaction_sets_persistent_look_emoji(self):
+        with patch("api.index.telegram_request", new=AsyncMock()) as telegram_request:
+            await set_processing_reaction(-5235714051, 99)
+        telegram_request.assert_awaited_once_with(
+            "setMessageReaction",
+            {
+                "chat_id": -5235714051,
+                "message_id": 99,
+                "reaction": [{"type": "emoji", "emoji": "👀"}],
+            },
+        )
+
     async def test_portfolio_command_uses_database_summary(self):
         with patch("api.index.asyncio.to_thread", new=AsyncMock(return_value="summary")):
             self.assertEqual(await command_reply("/portfolio"), "summary")
